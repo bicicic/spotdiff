@@ -10,6 +10,8 @@ export function mountCornerEditor(
 ) {
   host.innerHTML = `<div class="editor-stage"><canvas class="corner-canvas" tabindex="0" aria-label="4隅の調整。下のボタンで角を選び、矢印キーで微調整できます。"></canvas><canvas class="loupe" width="144" height="144" hidden></canvas></div><div class="corner-buttons" role="group" aria-label="調整する角">${names.map((n, i) => `<button type="button" data-corner="${i}" aria-pressed="${i === 0}">${i + 1} ${n}</button>`).join("")}</div><p class="hint">同じ対象の4隅を囲んでください。ドラッグ中は拡大表示します。矢印キーでも調整できます。</p>`;
   const canvas = host.querySelector<HTMLCanvasElement>(".corner-canvas")!;
+  const stage = host.querySelector<HTMLDivElement>(".editor-stage")!;
+  const events = new AbortController();
   const loupe = host.querySelector<HTMLCanvasElement>(".loupe")!;
   const image = pixelCanvas(slot.pixels);
   const previewSection = document.createElement("details");
@@ -22,8 +24,8 @@ export function mountCornerEditor(
   const ctx = canvas.getContext("2d")!;
   canvas.width = image.width;
   canvas.height = image.height;
-  let selected = 0,
-    dragging = false;
+  let selected = 0;
+  let activePointer: number | undefined;
   function select(i: number) {
     selected = i;
     host
@@ -103,7 +105,8 @@ export function mountCornerEditor(
     loupe.style.left = x > 0.5 ? "12px" : "auto";
     loupe.style.right = x > 0.5 ? "auto" : "12px";
   }
-  canvas.onpointerdown = (e) => {
+  stage.onpointerdown = (e) => {
+    if (activePointer !== undefined || e.button !== 0) return;
     const r = canvas.getBoundingClientRect();
     const distance = slot.corners.map((p) =>
       Math.hypot(
@@ -113,22 +116,37 @@ export function mountCornerEditor(
     );
     const nearest = distance.indexOf(Math.min(...distance));
     if (distance[nearest] > 48) return;
+    e.preventDefault();
     select(nearest);
-    dragging = true;
-    canvas.setPointerCapture(e.pointerId);
+    activePointer = e.pointerId;
+    stage.setPointerCapture(e.pointerId);
     canvas.focus({ preventScroll: true });
     update(e);
   };
-  canvas.onpointermove = (e) => {
-    if (dragging) update(e);
-  };
   const end = () => {
-    dragging = false;
+    const pointer = activePointer;
+    activePointer = undefined;
+    if (pointer !== undefined && stage.hasPointerCapture(pointer)) {
+      stage.releasePointerCapture(pointer);
+    }
     loupe.hidden = true;
   };
-  canvas.onpointerup = end;
-  canvas.onpointercancel = end;
-  canvas.onlostpointercapture = end;
+  // Keep tracking outside the image (and if capture is unexpectedly released).
+  // Only the finger that started this drag can move or finish it.
+  window.addEventListener("pointermove", (e) => {
+    if (e.pointerId !== activePointer) return;
+    e.preventDefault();
+    update(e);
+  }, { signal: events.signal, passive: false });
+  window.addEventListener("pointerup", (e) => {
+    if (e.pointerId !== activePointer) return;
+    update(e);
+    end();
+  }, { signal: events.signal });
+  window.addEventListener("pointercancel", (e) => {
+    if (e.pointerId === activePointer) end();
+  }, { signal: events.signal });
+  window.addEventListener("blur", end, { signal: events.signal });
   const keydown = (e: KeyboardEvent) => {
     const directions: Record<string, [number, number]> = {
       ArrowLeft: [-1, 0],
@@ -158,6 +176,9 @@ export function mountCornerEditor(
   observer.observe(canvas);
   draw();
   return () => {
+    end();
+    events.abort();
+    stage.onpointerdown = null;
     observer.disconnect();
     clearTimeout(previewTimer);
   };

@@ -236,6 +236,66 @@ test("4隅のドラッグ、無効領域、リセット、回転、キーボー�
   ).toBeEnabled();
 });
 
+test("画像外の余白からつかみ、境界外でもドラッグを継続できる", async ({ page }) => {
+  await page.goto("./");
+  await loadPair(page);
+  const canvas = page.locator(".corner-canvas");
+  const stage = page.locator(".editor-stage");
+  await stage.scrollIntoViewIfNeeded();
+  const rect = (await canvas.boundingBox())!;
+  await stage.evaluate(el => el.addEventListener("pointerdown", event => {
+    el.setAttribute("data-test-pointer", String((event as PointerEvent).pointerId));
+  }, { once: true }));
+  await page.mouse.move(rect.x - 8, rect.y + rect.height * .05);
+  await page.mouse.down();
+  await expect(page.locator(".loupe")).toBeVisible();
+  const edge = await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL());
+  await page.mouse.move(rect.x - 35, rect.y + rect.height * .05);
+  await expect(page.locator(".loupe")).toBeVisible();
+  expect(await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL())).toBe(edge);
+  // Losing capture alone must not end the drag; window tracking still works.
+  await stage.evaluate(el => el.releasePointerCapture(Number(el.getAttribute("data-test-pointer"))));
+  await page.evaluate(() => {
+    window.dispatchEvent(new PointerEvent("pointermove", { pointerId: 999, clientX: 0, clientY: 0 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 999 }));
+  });
+  await expect(page.locator(".loupe")).toBeVisible();
+  expect(await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL())).toBe(edge);
+  await page.mouse.move(rect.x + rect.width * .15, rect.y + rect.height * .15);
+  expect(await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL())).not.toBe(edge);
+  await page.mouse.up();
+  await expect(page.locator(".loupe")).toBeHidden();
+  await expect(page.locator("#quad-error")).toBeHidden();
+  const finished = await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL());
+  await page.mouse.move(rect.x + rect.width * .3, rect.y + rect.height * .3);
+  expect(await canvas.evaluate(el => (el as HTMLCanvasElement).toDataURL())).toBe(finished);
+});
+
+test("タッチ操作でも余白と画像外を移動でき、ページがスクロールしない", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "CDPの実タッチ入力はChromiumで検証する");
+  await page.setViewportSize({ width: 390, height: 844 });
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await page.goto("./");
+  await loadPair(page);
+  await page.locator(".editor-stage").scrollIntoViewIfNeeded();
+  const rect = (await page.locator(".corner-canvas").boundingBox())!;
+  const scroll = await page.evaluate(() => window.scrollY);
+  const touch = async (type: "touchStart" | "touchMove", x: number, y: number) => {
+    await session.send("Input.dispatchTouchEvent", { type, touchPoints: [{ x, y, id: 1 }] });
+  };
+  await touch("touchStart", rect.x - 8, rect.y + rect.height * .05);
+  await touch("touchMove", rect.x - 35, rect.y + rect.height * .2);
+  await expect(page.locator(".loupe")).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(scroll);
+  await touch("touchMove", rect.x + rect.width * .1, rect.y + rect.height * .1);
+  await expect(page.locator(".loupe")).toBeVisible();
+  await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator(".loupe")).toBeHidden();
+  await expect(page.locator("#quad-error")).toBeHidden();
+  await session.detach();
+});
+
 test("10MBを超えるファイルを拒否する", async ({ page }) => {
   await page.goto("./");
   await page.getByLabel("1枚目の画像を選択", { exact: true }).setInputFiles({
